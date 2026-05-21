@@ -1,0 +1,28 @@
+{
+  "name": "docsign-frontend",
+  "version": "2.0.0",
+  "private": true,
+  "dependencies": {
+    "@simplewebauthn/browser": "^9.0.1",
+    "autoprefixer": "^10.4.19",
+    "axios": "^1.7.2",
+    "date-fns": "^3.6.0",
+    "lucide-react": "^0.395.0",
+    "postcss": "^8.4.39",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hot-toast": "^2.4.1",
+    "react-router-dom": "^6.24.0",
+    "react-scripts": "5.0.1",
+    "tailwindcss": "^3.4.6"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build"
+  },
+  "proxy": "http://localhost:5000",
+  "browserslist": {
+    "production": [">0.2%", "not dead", "not op_mini all"],
+    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+  }
+}

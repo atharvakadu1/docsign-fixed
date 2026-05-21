@@ -1,0 +1,29 @@
+# render.yaml — deploy backend to Render (free tier)
+services:
+  - type: web
+    name: docsign-api
+    env: node
+    region: singapore
+    plan: free
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false          # set in Render dashboard
+      - key: JWT_SECRET
+        generateValue: true  # Render auto-generates
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: WEBAUTHN_RP_ID
+        sync: false          # set to your Render domain e.g. docsign-api.onrender.com
+      - key: WEBAUTHN_RP_NAME
+        value: DocSign Platform
+      - key: WEBAUTHN_ORIGIN
+        sync: false          # set to your Vercel URL e.g. https://docsign.vercel.app
+      - key: CLIENT_URL
+        sync: false          # same as WEBAUTHN_ORIGIN
+    healthCheckPath: /api/health
+    autoDeploy: true
