@@ -5,6 +5,7 @@ const router = express.Router();
 const SignatureRequest = require('../models/SignatureRequest');
 const Document        = require('../models/Document');
 const AuditLog        = require('../models/AuditLog');
+const User            = require('../models/User');
 const { protect, getClientInfo } = require('../middleware/auth');
 const { extendChain }            = require('../services/hashService');
 const { addBlock }               = require('../services/blockchainService');
@@ -12,32 +13,70 @@ const { addBlock }               = require('../services/blockchainService');
 // ── POST /:requestId/sign ─────────────────────────────────
 router.post('/:requestId/sign', protect, async (req, res) => {
   try {
-    const { authMethod = 'biometric', biometricVerified = false } = req.body;
+    const { authMethod = 'biometric', biometricVerified = false, password } = req.body;
     const { ip, userAgent } = getClientInfo(req);
 
-    // Load request
+    // ── Load and validate the signature request ────────────
     const request = await SignatureRequest.findById(req.params.requestId);
-    if (!request)                       return res.status(404).json({ error: 'Signature request not found' });
-    if (request.signerId.toString() !== req.user._id.toString()) {
+    if (!request)
+      return res.status(404).json({ error: 'Signature request not found' });
+    if (request.signerId.toString() !== req.user._id.toString())
       return res.status(403).json({ error: 'You are not authorized to sign this request' });
-    }
-    if (request.status === 'signed')    return res.status(400).json({ error: 'Already signed' });
-    if (request.status === 'rejected')  return res.status(400).json({ error: 'Request was rejected' });
-    if (request.status === 'expired')   return res.status(400).json({ error: 'Request has expired' });
+    if (request.status === 'signed')
+      return res.status(400).json({ error: 'Already signed' });
+    if (request.status === 'rejected')
+      return res.status(400).json({ error: 'Request was rejected' });
+    if (request.status === 'expired')
+      return res.status(400).json({ error: 'Request has expired' });
 
-    // Biometric must be verified before signing
-    if (authMethod === 'biometric' && !biometricVerified) {
-      return res.status(401).json({ error: 'Complete biometric verification before signing' });
+    // ── Auth-method enforcement ────────────────────────────
+    if (authMethod === 'biometric') {
+      // Biometric path: the WebAuthn challenge must have been verified
+      // on the client side and biometricVerified flag set to true.
+      if (!biometricVerified) {
+        return res.status(401).json({ error: 'Complete biometric verification before signing' });
+      }
+    } else if (authMethod === 'password') {
+      // Password-fallback path: the user must re-enter their password.
+      // We verify it server-side right here.
+      if (!password || typeof password !== 'string' || !password.trim()) {
+        return res.status(400).json({ error: 'Password is required for password-based signing' });
+      }
+
+      // Load the full user document so we can compare the hashed password
+      const userDoc = await User.findById(req.user._id).select('+password');
+      if (!userDoc) {
+        return res.status(401).json({ error: 'User not found' });
+      }
+
+      const passwordMatch = await userDoc.comparePassword(password);
+      if (!passwordMatch) {
+        // Record a failed signing attempt in the audit log
+        await AuditLog.record({
+          docId:  request.docId,
+          userId: req.user._id,
+          action: 'signing_failed',
+          description: `${req.user.name} provided an incorrect password during password-fallback signing`,
+          metadata: { authMethod: 'password', reason: 'incorrect_password' },
+          ip,
+          userAgent,
+        });
+        return res.status(401).json({ error: 'Incorrect password. Please try again.' });
+      }
+    } else {
+      return res.status(400).json({ error: 'Invalid authMethod. Must be "biometric" or "password".' });
     }
 
-    // Load document
+    // ── Load document ──────────────────────────────────────
     const doc = await Document.findById(request.docId);
-    if (!doc || doc.isDeleted) return res.status(404).json({ error: 'Document not found' });
-    if (doc.status === 'completed') return res.status(400).json({ error: 'Document is already fully signed' });
+    if (!doc || doc.isDeleted)
+      return res.status(404).json({ error: 'Document not found' });
+    if (doc.status === 'completed')
+      return res.status(400).json({ error: 'Document is already fully signed' });
 
     // ── Hash chain extension ───────────────────────────────
     // New chain hash = SHA256(previousChainHash + signerEmail)
-    const prevHash    = doc.currentHash;
+    const prevHash     = doc.currentHash;
     const newChainHash = extendChain(prevHash, req.user.email);
 
     // Append to hash chain history
@@ -56,9 +95,11 @@ router.post('/:requestId/sign', protect, async (req, res) => {
     request.authMethod      = authMethod;
     request.signatureHash   = newChainHash;
     request.hashChainIndex  = doc.hashChain.length - 1;
-    request.biometricDevice = req.body.deviceName || 'Unknown device';
-    request.ipAddress       = ip;
-    request.userAgent       = userAgent;
+    request.biometricDevice = authMethod === 'biometric'
+      ? (req.body.deviceName || 'Unknown device')
+      : null;
+    request.ipAddress = ip;
+    request.userAgent = userAgent;
 
     // ── Check if document is now fully signed ──────────────
     const allRequests = await SignatureRequest.find({ docId: doc._id });
@@ -85,9 +126,9 @@ router.post('/:requestId/sign', protect, async (req, res) => {
       action:     'signed',
       metadata: {
         authMethod,
-        requestId:      request._id.toString(),
+        requestId:        request._id.toString(),
         signedCount,
-        totalSigners:   allRequests.length,
+        totalSigners:     allRequests.length,
         documentComplete: isComplete,
       },
     });
@@ -97,22 +138,28 @@ router.post('/:requestId/sign', protect, async (req, res) => {
 
     // ── Audit log ──────────────────────────────────────────
     await AuditLog.record({
-      docId:  doc._id, userId: req.user._id,
+      docId:  doc._id,
+      userId: req.user._id,
       action: 'signing_completed',
       description: `${req.user.name} signed "${doc.title}" using ${authMethod}`,
       metadata: {
-        authMethod, blockIndex: block.index, newHash: newChainHash,
-        documentComplete: isComplete, signedCount, totalSigners: allRequests.length,
+        authMethod,
+        blockIndex:       block.index,
+        newHash:          newChainHash,
+        documentComplete: isComplete,
+        signedCount,
+        totalSigners:     allRequests.length,
       },
-      ip, userAgent,
+      ip,
+      userAgent,
     });
 
     res.json({
-      success:   true,
-      message:   isComplete ? '🎉 Document fully signed!' : 'Signature recorded successfully',
-      status:    doc.status,
-      newHash:   newChainHash,
-      blockIndex: block.index,
+      success:      true,
+      message:      isComplete ? '🎉 Document fully signed!' : 'Signature recorded successfully',
+      status:       doc.status,
+      newHash:      newChainHash,
+      blockIndex:   block.index,
       signedCount,
       totalSigners: allRequests.length,
       isComplete,
@@ -129,13 +176,12 @@ router.post('/:requestId/reject', protect, async (req, res) => {
     const { ip, userAgent } = getClientInfo(req);
 
     const request = await SignatureRequest.findById(req.params.requestId);
-    if (!request) return res.status(404).json({ error: 'Request not found' });
-    if (request.signerId.toString() !== req.user._id.toString()) {
+    if (!request)
+      return res.status(404).json({ error: 'Request not found' });
+    if (request.signerId.toString() !== req.user._id.toString())
       return res.status(403).json({ error: 'Not authorized' });
-    }
-    if (['signed', 'rejected'].includes(request.status)) {
+    if (['signed', 'rejected'].includes(request.status))
       return res.status(400).json({ error: `Cannot reject a ${request.status} request` });
-    }
 
     request.status          = 'rejected';
     request.rejectedAt      = new Date();
@@ -143,10 +189,13 @@ router.post('/:requestId/reject', protect, async (req, res) => {
     await request.save();
 
     await AuditLog.record({
-      docId: request.docId, userId: req.user._id,
+      docId:  request.docId,
+      userId: req.user._id,
       action: 'signing_rejected',
       description: `${req.user.name} rejected the signature request. Reason: ${reason}`,
-      metadata: { reason }, ip, userAgent,
+      metadata: { reason },
+      ip,
+      userAgent,
     });
 
     res.json({ success: true, message: 'Signature request rejected' });

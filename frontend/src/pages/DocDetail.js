@@ -9,7 +9,7 @@ import { BiometricAuth } from '../components/BiometricButton';
 import {
   FileText, Hash, Shield, Cpu, QrCode, Clock,
   CheckCircle, XCircle, Fingerprint, ChevronLeft,
-  AlertCircle, Link2, ArrowRight, Eye, Download
+  AlertCircle, Link2, ArrowRight, Eye, Download, Lock
 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -25,12 +25,22 @@ export default function DocDetail() {
   const [loading, setLoading]   = useState(true);
   const [tab, setTab]           = useState('overview');
   const [signing, setSigning]   = useState(false);
-  const [showBio, setShowBio]   = useState(false);
+  const [downloading, setDownloading] = useState(false);
+
+  // ── Auth-method state ──────────────────────────────────────────────────────
+  // 'idle' | 'biometric' | 'password' | 'done'
+  const [signStep, setSignStep]       = useState('idle');
   const [bioVerified, setBioVerified] = useState(false);
   const [bioDevice, setBioDevice]     = useState('');
+
+  // Password fallback
+  const [password, setPassword]         = useState('');
+  const [pwdError, setPwdError]         = useState('');
+  const [pwdChecking, setPwdChecking]   = useState(false);
+
+  // Reject
   const [rejectReason, setRejectReason] = useState('');
-  const [showReject, setShowReject]   = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [showReject, setShowReject]     = useState(false);
 
   const load = async () => {
     try {
@@ -70,25 +80,63 @@ export default function DocDetail() {
     } finally { setDownloading(false); }
   };
 
-  // Authenticated PDF view URL (uses token in header via api interceptor but for <object> we need a direct URL with token)
   const token = localStorage.getItem('ds_token');
   const pdfViewUrl = `${process.env.REACT_APP_API_URL || '/api'}/documents/${id}/view?token=${token}`;
 
-  const sign = async () => {
+  // ── Called after auth is confirmed (biometric or password) ─────────────────
+  const executeSign = async ({ authMethod, deviceName }) => {
     if (!myRequest) return;
     setSigning(true);
     try {
       await sigAPI.sign(myRequest._id, {
-        authMethod: bioVerified ? 'biometric' : 'password',
-        biometricVerified: bioVerified,
-        deviceName: bioDevice,
+        authMethod,
+        biometricVerified: authMethod === 'biometric',
+        deviceName: deviceName || '',
+        // password is sent only for password fallback — backend verifies it
+        ...(authMethod === 'password' && { password }),
       });
       toast.success('Document signed successfully!');
-      setBioVerified(false); setShowBio(false);
+      // reset all auth state
+      setBioVerified(false); setBioDevice(''); setPassword('');
+      setPwdError(''); setSignStep('idle');
       load();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Signing failed');
     } finally { setSigning(false); }
+  };
+
+  // ── "Sign Document" button handler ─────────────────────────────────────────
+  // Always open the biometric modal first. Password is only offered as fallback
+  // from inside that modal.
+  const handleSignClick = () => {
+    setPassword(''); setPwdError(''); setBioVerified(false);
+    setSignStep('biometric');
+  };
+
+  // ── Biometric succeeded ────────────────────────────────────────────────────
+  const handleBioSuccess = ({ deviceName }) => {
+    setBioVerified(true);
+    setBioDevice(deviceName || 'device');
+    setSignStep('idle');
+    executeSign({ authMethod: 'biometric', deviceName });
+  };
+
+  // ── User chose to fall back to password ───────────────────────────────────
+  const handleBioSkip = () => {
+    setSignStep('password');
+  };
+
+  // ── Password form submit ───────────────────────────────────────────────────
+  const handlePasswordSign = async (e) => {
+    e.preventDefault();
+    if (!password.trim()) { setPwdError('Password is required.'); return; }
+    setPwdChecking(true); setPwdError('');
+    try {
+      await executeSign({ authMethod: 'password' });
+    } catch {
+      // executeSign already toasts; surface field error too
+      setPwdError('Incorrect password. Please try again.');
+    } finally { setPwdChecking(false); }
   };
 
   const reject = async () => {
@@ -132,24 +180,17 @@ export default function DocDetail() {
         </Btn>
       </div>
 
-      {/* Sign action banner */}
+      {/* ── Sign action banner ── */}
       {canSign && (
         <div className="bg-blue-900/20 border border-blue-700/50 rounded-xl p-4 flex items-center gap-4 flex-wrap">
           <div className="flex-1 min-w-0">
             <p className="font-medium text-blue-300 mb-0.5">Your signature is required</p>
             <p className="text-xs text-slate-400">
-              {bioVerified
-                ? `✓ Biometric verified on ${bioDevice} — ready to sign`
-                : 'Use biometric authentication for maximum security'}
+              Biometric verification is required first. If unavailable, you may re-enter your password.
             </p>
           </div>
           <div className="flex gap-2 flex-wrap">
-            {!bioVerified && (
-              <Btn variant="outline" size="sm" onClick={() => setShowBio(true)}>
-                <Fingerprint size={13} /> Biometric
-              </Btn>
-            )}
-            <Btn variant="success" size="sm" loading={signing} onClick={sign}>
+            <Btn variant="success" size="sm" loading={signing} onClick={handleSignClick}>
               <CheckCircle size={13} /> Sign Document
             </Btn>
             <Btn variant="danger" size="sm" onClick={() => setShowReject(!showReject)}>
@@ -159,25 +200,101 @@ export default function DocDetail() {
         </div>
       )}
 
-      {/* Biometric modal */}
-      {showBio && (
+      {/* ── Biometric modal ── */}
+      {signStep === 'biometric' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-md animate-fadeIn">
             <div className="flex items-center justify-between p-4 border-b border-slate-700">
-              <h3 className="font-semibold text-white">Biometric Verification</h3>
-              <button onClick={() => setShowBio(false)} className="text-slate-400 hover:text-white p-1"><XCircle size={18} /></button>
+              <h3 className="font-semibold text-white flex items-center gap-2">
+                <Fingerprint size={16} className="text-blue-400" /> Biometric Verification
+              </h3>
+              <button
+                onClick={() => setSignStep('idle')}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <XCircle size={18} />
+              </button>
             </div>
             <BiometricAuth
-              onSuccess={({ deviceName }) => {
-                setBioVerified(true); setBioDevice(deviceName || 'device'); setShowBio(false);
-              }}
-              onSkip={() => setShowBio(false)}
+              onSuccess={handleBioSuccess}
+              onSkip={handleBioSkip}
             />
           </div>
         </div>
       )}
 
-      {/* Reject form */}
+      {/* ── Password fallback modal ── */}
+      {signStep === 'password' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-sm animate-fadeIn">
+            <div className="flex items-center justify-between p-4 border-b border-slate-700">
+              <h3 className="font-semibold text-white flex items-center gap-2">
+                <Lock size={16} className="text-amber-400" /> Confirm Your Password
+              </h3>
+              <button
+                onClick={() => { setSignStep('idle'); setPassword(''); setPwdError(''); }}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <XCircle size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handlePasswordSign} className="p-6 space-y-4">
+              <div className="flex items-start gap-3 bg-amber-900/20 border border-amber-700/40 rounded-lg p-3">
+                <AlertCircle size={16} className="text-amber-400 flex-shrink-0 mt-0.5" />
+                <p className="text-xs text-amber-300">
+                  Biometric was skipped or unavailable. You must re-enter your account password to sign this document. This is recorded in the audit trail.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1.5">
+                  Account Password
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={e => { setPassword(e.target.value); setPwdError(''); }}
+                  placeholder="Enter your password"
+                  autoFocus
+                  className={`w-full px-3 py-2.5 bg-slate-800 border rounded-lg text-sm text-slate-200
+                    placeholder:text-slate-500 focus:outline-none focus:ring-2 transition-colors
+                    ${pwdError
+                      ? 'border-red-500 focus:ring-red-500/30'
+                      : 'border-slate-600 focus:ring-blue-500/30 focus:border-blue-500'}`}
+                />
+                {pwdError && (
+                  <p className="mt-1.5 text-xs text-red-400 flex items-center gap-1">
+                    <AlertCircle size={11} /> {pwdError}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex gap-2 pt-1">
+                <Btn
+                  type="submit"
+                  variant="success"
+                  className="flex-1"
+                  loading={pwdChecking || signing}
+                  disabled={!password.trim()}
+                >
+                  <CheckCircle size={14} /> Sign with Password
+                </Btn>
+                <Btn
+                  type="button"
+                  variant="ghost"
+                  onClick={() => { setSignStep('biometric'); setPassword(''); setPwdError(''); }}
+                  disabled={pwdChecking || signing}
+                >
+                  Try Biometric
+                </Btn>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ── Reject form ── */}
       {showReject && (
         <Card className="border-red-700/40 animate-fadeIn">
           <p className="text-sm font-medium text-red-400 mb-3">Rejection reason (required)</p>
@@ -192,7 +309,7 @@ export default function DocDetail() {
         </Card>
       )}
 
-      {/* Signed status banner */}
+      {/* ── Signed status banner ── */}
       {isSigned && (
         <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-xl px-4 py-3 flex items-center gap-3 flex-wrap animate-fadeIn">
           <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -326,7 +443,6 @@ export default function DocDetail() {
                 height="100%"
                 className="block"
               >
-                {/* Fallback for browsers that block object tag PDF */}
                 <div className="flex flex-col items-center justify-center h-full gap-4 p-8 text-center">
                   <FileText size={48} className="text-slate-600" />
                   <div>
