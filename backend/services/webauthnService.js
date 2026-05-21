@@ -135,33 +135,33 @@ async function verifyAuthResponse(user, response, expectedChallenge) {
     throw new Error('Credential not found. Has this device been registered?');
   }
 
+  // @simplewebauthn/server v9: parameter is 'authenticator' (not 'credential'),
+  // and fields are credentialID / credentialPublicKey (not id / publicKey)
   const verification = await verifyAuthenticationResponse({
     response,
     expectedChallenge,
     expectedOrigin:          ORIGIN,
     expectedRPID:            RP_ID,
     requireUserVerification: true,
-    credential: {
-      id:         isoBase64URL.toBuffer(storedCred.credentialID),
-      publicKey:  isoBase64URL.toBuffer(storedCred.credentialPublicKey),
-      counter:    storedCred.counter,
-      transports: storedCred.transports || [],
+    authenticator: {
+      credentialID:        isoBase64URL.toBuffer(storedCred.credentialID),
+      credentialPublicKey: isoBase64URL.toBuffer(storedCred.credentialPublicKey),
+      counter:             storedCred.counter,
+      transports:          storedCred.transports || [],
     },
   });
 
-  if (!verification.verified) {
+  if (!verification.verified || !verification.authenticationInfo) {
     throw new Error('Biometric verification failed — signature did not match');
   }
 
   // Update counter (prevents replay attacks)
-  // @simplewebauthn/server v9: counter is at authenticationInfo.newCounter
-  const newCounter = verification.authenticationInfo?.newCounter ?? verification.authenticationInfo?.credentialCounter;
-  storedCred.counter = newCounter;
+  storedCred.counter = verification.authenticationInfo.newCounter;
   await user.save();
 
   return {
-    verified:   true,
-    deviceName: storedCred.deviceName,
+    verified:     true,
+    deviceName:   storedCred.deviceName,
     credentialID: storedCred.credentialID,
   };
 }
