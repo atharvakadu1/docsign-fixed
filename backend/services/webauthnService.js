@@ -74,12 +74,21 @@ async function verifyRegResponse(user, response, expectedChallenge) {
   }
 
   const { registrationInfo } = verification;
-  const { credential, credentialDeviceType, credentialBackedUp } = registrationInfo;
+
+  // @simplewebauthn/server v9: fields are at the top level of registrationInfo,
+  // NOT nested under registrationInfo.credential
+  const {
+    credentialID,
+    credentialPublicKey,
+    counter,
+    credentialDeviceType,
+    credentialBackedUp,
+  } = registrationInfo;
 
   const newCred = {
-    credentialID:        isoBase64URL.fromBuffer(credential.id),
-    credentialPublicKey: isoBase64URL.fromBuffer(credential.publicKey),
-    counter:             credential.counter,
+    credentialID:        isoBase64URL.fromBuffer(credentialID),
+    credentialPublicKey: isoBase64URL.fromBuffer(credentialPublicKey),
+    counter:             counter,
     deviceType:          credentialDeviceType,
     backedUp:            credentialBackedUp,
     transports:          response.response?.transports || [],
@@ -145,7 +154,9 @@ async function verifyAuthResponse(user, response, expectedChallenge) {
   }
 
   // Update counter (prevents replay attacks)
-  storedCred.counter = verification.authenticationInfo.newCounter;
+  // @simplewebauthn/server v9: counter is at authenticationInfo.newCounter
+  const newCounter = verification.authenticationInfo?.newCounter ?? verification.authenticationInfo?.credentialCounter;
+  storedCred.counter = newCounter;
   await user.save();
 
   return {
